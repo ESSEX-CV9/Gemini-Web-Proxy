@@ -1,6 +1,6 @@
 # 🚀 Gemini to OpenAI API Proxy
 
-将 Gemini 网页版包装为 OpenAI API 格式，让你能在 VS Code Kilo Code 等 IDE 或者其他前端 中使用。
+将 Gemini 网页版包装为 OpenAI API 格式，让你能在其他前端中使用。
 
 ## ✨ 特性
 
