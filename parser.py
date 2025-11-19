@@ -359,6 +359,15 @@ class GeminiResponseParser:
         extract_recursive(data)
         return texts
     
+    def __init__(self):
+        self.conversation_id = None
+        self.response_id = None
+        # 用于跟踪上次发送的内容，实现增量输出
+        self.last_thinking = ""
+        self.last_content = ""
+        # 用于标记思维链是否已完成（避免思维链和正文混淆）
+        self.thinking_completed = False
+    
     def to_openai_format(self, data_chunk, is_done: bool = False, model: str = "gemini-pro") -> str:
         """
         转换为 OpenAI SSE 格式
@@ -369,6 +378,10 @@ class GeminiResponseParser:
             model: 模型名称
         """
         if is_done:
+            # 重置状态
+            self.last_thinking = ""
+            self.last_content = ""
+            self.thinking_completed = False
             return "data: [DONE]\n\n"
         
         # 构建delta对象
@@ -379,29 +392,74 @@ class GeminiResponseParser:
             thinking = data_chunk.get('thinking')
             content = data_chunk.get('content')
             
+            # 计算增量（只发送新增的部分）
+            thinking_delta = None
+            content_delta = None
+            
+            # 处理思维链更新
+            if thinking and thinking != self.last_thinking:
+                if config.USE_DOM_STREAMING:
+                    # DOM流式模式：计算增量
+                    if self.last_thinking and thinking.startswith(self.last_thinking):
+                        # 新文本是旧文本的扩展，只发送增量部分
+                        thinking_delta = thinking[len(self.last_thinking):]
+                    else:
+                        # 完全不同的内容，发送全部
+                        thinking_delta = thinking
+                else:
+                    # 网络监听模式：已经是增量
+                    thinking_delta = thinking
+                self.last_thinking = thinking
+            elif thinking and not self.thinking_completed:
+                # 思维链没有变化，标记为已完成
+                self.thinking_completed = True
+            
+            # 处理正文更新
+            if content and content != self.last_content:
+                if config.USE_DOM_STREAMING:
+                    # DOM流式模式：计算增量
+                    if self.last_content and content.startswith(self.last_content):
+                        # 新文本是旧文本的扩展，只发送增量部分
+                        content_delta = content[len(self.last_content):]
+                    else:
+                        # 完全不同的内容
+                        # 检查是否是思维链误入正文的情况
+                        if self.thinking_completed and self.last_thinking and content.startswith(self.last_thinking):
+                            # 这是思维链的尾部被误认为正文，跳过这部分
+                            actual_content = content[len(self.last_thinking):].lstrip()
+                            if actual_content:
+                                content_delta = actual_content
+                        else:
+                            # 正常的新内容
+                            content_delta = content
+                else:
+                    # 网络监听模式：已经是增量
+                    content_delta = content
+                self.last_content = content
+            
             # 根据配置选择格式
             if config.ENABLE_THINKING and config.THINKING_FORMAT == "reasoning_content":
                 # o1系列格式：使用单独的reasoning_content字段
-                if thinking:
-                    delta["reasoning_content"] = thinking
-                if content:
-                    delta["content"] = content
+                if thinking_delta:
+                    delta["reasoning_content"] = thinking_delta
+                if content_delta:
+                    delta["content"] = content_delta
             elif config.ENABLE_THINKING and config.THINKING_FORMAT == "inline":
                 # 内联格式：在content中用<think>标签包裹
                 combined_content = ""
-                if thinking:
-                    combined_content = f"<think>\n{thinking}\n</think>"
-                if content:
+                if thinking_delta:
+                    combined_content = f"<think>\n{thinking_delta}\n</think>"
+                if content_delta:
                     if combined_content:
-                        combined_content += f"\n\n{content}"
+                        combined_content += f"\n\n{content_delta}"
                     else:
-                        combined_content = content
+                        combined_content = content_delta
                 if combined_content:
                     delta["content"] = combined_content
             else:
                 # 不启用思维链，只返回content
-                if content:
-                    delta["content"] = content
+                if content_delta:
+                    delta["content"] = content_delta
         else:
             # 兼容旧格式：直接是字符串
             if data_chunk:

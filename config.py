@@ -28,7 +28,7 @@ else:  # Linux
 GEMINI_URL = "https://gemini.google.com/app"
 
 # 浏览器配置
-HEADLESS = True  # 是否无头模式（True = 不显示浏览器窗口）
+HEADLESS = False  # 是否无头模式（True = 不显示浏览器窗口）
 TIMEOUT = 60000  # 浏览器操作超时时间（毫秒）
 
 # 响应等待配置
@@ -56,3 +56,8 @@ DEFAULT_MODEL = "gemini-pro"
 # 思维链配置
 THINKING_FORMAT = "reasoning_content"  # 可选值: "reasoning_content" (o1格式) 或 "inline" (内联格式)
 ENABLE_THINKING = True  # 是否启用思维链返回
+
+# DOM流式配置 ---- 实验性功能 谨慎使用 ----
+USE_DOM_STREAMING = True  # 流式模式是否使用DOM监听（True=真流式，False=假流式）
+DOM_POLL_INTERVAL = 0.2  # DOM轮询间隔（秒）
+DOM_STABLE_TIMEOUT = 20  # 文本不变化多少秒后判定完成（秒）

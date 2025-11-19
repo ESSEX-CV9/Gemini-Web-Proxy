@@ -111,7 +111,6 @@ def chat_completions():
 
 def stream_response(messages: list, model: str = config.DEFAULT_MODEL):
     """流式响应生成器"""
-    parser = GeminiResponseParser()
     loop = get_event_loop()
     
     # 创建队列用于线程间通信
@@ -121,6 +120,8 @@ def stream_response(messages: list, model: str = config.DEFAULT_MODEL):
     async def async_generator():
         try:
             client = await get_client()
+            # 使用client的parser实例，保持状态
+            parser = client.parser
             
             # 流式获取响应
             async for data_chunk in client.send_message(messages, model=model):

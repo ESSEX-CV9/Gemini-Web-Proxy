@@ -7,6 +7,7 @@ from typing import AsyncGenerator, Optional
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 import config
 from parser import GeminiResponseParser
+import html2text
 
 
 class GeminiClient:
@@ -21,6 +22,12 @@ class GeminiClient:
         self.parser = GeminiResponseParser()
         self._response_chunks = []
         self._response_complete = False
+        # 初始化html2text转换器
+        self.html_converter = html2text.HTML2Text()
+        self.html_converter.body_width = 0  # 不自动换行
+        self.html_converter.ignore_links = False  # 保留链接
+        self.html_converter.ignore_images = False  # 保留图片
+        self.html_converter.ignore_emphasis = False  # 保留强调（加粗、斜体）
     
     def _format_messages_to_prompt(self, messages: list) -> str:
         """
@@ -275,6 +282,151 @@ class GeminiClient:
             print("   将使用当前默认模型继续")
     
     
+    async def _monitor_dom_updates(self, page: Page, use_streaming: bool = True) -> AsyncGenerator[dict, None]:
+        """
+        实时监控DOM更新并流式返回
+        
+        Args:
+            page: Playwright页面对象
+            use_streaming: 是否使用流式模式（True=DOM监听，False=等待完成后返回）
+        
+        Returns:
+            AsyncGenerator yielding dict with format:
+            {
+                "thinking": "思维链内容" or None,
+                "content": "正文内容" or None
+            }
+        """
+        print(f"🔍 开始监控DOM更新 (流式模式: {use_streaming})")
+        
+        # 等待正文容器出现
+        try:
+            await page.wait_for_selector('message-content .markdown', timeout=10000)
+            print("✅ 正文容器已出现")
+        except Exception as e:
+            print(f"⚠️ 等待正文容器超时: {e}")
+        
+        last_thinking = ""
+        last_content = ""
+        stable_count = 0
+        max_stable_count = int(config.DOM_STABLE_TIMEOUT / config.DOM_POLL_INTERVAL)
+        
+        # 检查并点击思维链按钮（如果存在）
+        thinking_button_clicked = False
+        
+        while True:
+            try:
+                # 1. 检查思维链按钮
+                if not thinking_button_clicked:
+                    thinking_button = await page.query_selector('button[data-test-id="thoughts-header-button"]')
+                    if thinking_button:
+                        # 检查按钮是否可见和可点击
+                        is_visible = await thinking_button.is_visible()
+                        if is_visible:
+                            try:
+                                await thinking_button.click()
+                                print("✅ 已点击思维链展开按钮")
+                                thinking_button_clicked = True
+                                await asyncio.sleep(0.3)  # 等待展开动画
+                            except Exception as e:
+                                if config.DEBUG:
+                                    print(f"⚠️ 点击思维链按钮失败: {e}")
+                
+                # 2. 提取思维链内容（保留格式）
+                current_thinking = None
+                if thinking_button_clicked:
+                    thinking_elements = await page.query_selector_all('model-thoughts[data-test-id="model-thoughts"] .thoughts-content .markdown')
+                    if thinking_elements:
+                        thinking_texts = []
+                        for elem in thinking_elements:
+                            # 使用inner_html获取HTML内容，然后转换为Markdown
+                            html_content = await elem.inner_html()
+                            if html_content and html_content.strip():
+                                # 转换HTML为Markdown
+                                markdown_text = self.html_converter.handle(html_content).strip()
+                                if markdown_text:
+                                    thinking_texts.append(markdown_text)
+                        if thinking_texts:
+                            current_thinking = "\n\n".join(thinking_texts)
+                
+                # 3. 提取正文内容（保留格式）
+                current_content = None
+                content_elements = await page.query_selector_all('message-content[class*="model-response-text"] .markdown')
+                if content_elements:
+                    content_texts = []
+                    for elem in content_elements:
+                        # 使用inner_html获取HTML内容，然后转换为Markdown
+                        html_content = await elem.inner_html()
+                        if html_content and html_content.strip():
+                            # 转换HTML为Markdown
+                            markdown_text = self.html_converter.handle(html_content).strip()
+                            if markdown_text:
+                                content_texts.append(markdown_text)
+                    if content_texts:
+                        current_content = "\n\n".join(content_texts)
+                
+                # 4. 检测变化
+                has_change = False
+                
+                if current_thinking != last_thinking:
+                    has_change = True
+                    last_thinking = current_thinking
+                    if config.DEBUG and current_thinking:
+                        print(f"📝 思维链更新: {current_thinking[:50]}...")
+                
+                if current_content != last_content:
+                    has_change = True
+                    last_content = current_content
+                    if config.DEBUG and current_content:
+                        print(f"📝 正文更新: {current_content[:50]}...")
+                
+                # 5. 返回数据
+                if has_change:
+                    stable_count = 0  # 重置稳定计数
+                    
+                    if use_streaming:
+                        # 流式模式：返回增量或完整数据
+                        yield {
+                            "thinking": current_thinking,
+                            "content": current_content
+                        }
+                else:
+                    stable_count += 1
+                
+                # 6. 检测完成
+                # 方法1: 文本稳定一段时间
+                if stable_count >= max_stable_count:
+                    print(f"✅ 文本已稳定 {config.DOM_STABLE_TIMEOUT} 秒，判定完成")
+                    # 返回最终数据
+                    if not use_streaming:
+                        yield {
+                            "thinking": current_thinking,
+                            "content": current_content
+                        }
+                    break
+                
+                # 方法2: 检测"停止生成"按钮消失（备用）
+                stop_button = await page.query_selector('button[aria-label*="Stop"], button[aria-label*="停止"]')
+                if not stop_button and stable_count > 5:  # 按钮消失且文本稳定一段时间
+                    print("✅ 停止按钮已消失，判定完成")
+                    if not use_streaming:
+                        yield {
+                            "thinking": current_thinking,
+                            "content": current_content
+                        }
+                    break
+                
+                # 等待下次轮询
+                await asyncio.sleep(config.DOM_POLL_INTERVAL)
+                
+            except Exception as e:
+                print(f"⚠️ DOM监控错误: {e}")
+                if config.DEBUG:
+                    import traceback
+                    traceback.print_exc()
+                await asyncio.sleep(config.DOM_POLL_INTERVAL)
+    
+    
     async def send_message(self, messages: list, model: str = "gemini-pro") -> AsyncGenerator[str, None]:
         """
         发送消息到 Gemini 并流式返回响应
@@ -460,73 +612,81 @@ class GeminiClient:
             # 等待响应开始
             await asyncio.sleep(2)
             
-            # 等待响应开始
-            await asyncio.sleep(1)
+            # 判断使用哪种方式获取响应
+            use_dom_streaming = config.USE_DOM_STREAMING
             
-            # 流式返回响应
-            max_wait_minutes = config.RESPONSE_TIMEOUT // 60
-            print(f"⏳ 等待响应（最长等待{max_wait_minutes}分钟，包含thinking时间）...")
-            last_text = ""
-            retry_count = 0
-            max_retries = config.RESPONSE_TIMEOUT * 2  # 每0.5秒检查一次，所以乘以2
-            chunks_processed = 0
-            
-            while retry_count < max_retries:
-                # 使用锁安全访问 response_chunks
-                async with response_lock:
-                    current_chunk_count = len(response_chunks)
+            if use_dom_streaming:
+                # 使用DOM监听方式（真流式）
+                print(f"🔄 使用DOM监听模式获取响应")
+                async for data in self._monitor_dom_updates(new_page, use_streaming=True):
+                    if data:
+                        yield data
+            else:
+                # 使用原有的网络监听方式（假流式）
+                print(f"🔄 使用网络监听模式获取响应")
+                max_wait_minutes = config.RESPONSE_TIMEOUT // 60
+                print(f"⏳ 等待响应（最长等待{max_wait_minutes}分钟，包含thinking时间）...")
+                last_text = ""
+                retry_count = 0
+                max_retries = config.RESPONSE_TIMEOUT * 2  # 每0.5秒检查一次，所以乘以2
+                chunks_processed = 0
                 
-                if current_chunk_count > chunks_processed:
-                    print(f"📦 处理响应块 {chunks_processed + 1}-{current_chunk_count}")
+                while retry_count < max_retries:
+                    # 使用锁安全访问 response_chunks
+                    async with response_lock:
+                        current_chunk_count = len(response_chunks)
                     
-                    # 处理新的响应块
-                    for i in range(chunks_processed, current_chunk_count):
-                        async with response_lock:
-                            chunk = response_chunks[i]
+                    if current_chunk_count > chunks_processed:
+                        print(f"📦 处理响应块 {chunks_processed + 1}-{current_chunk_count}")
                         
-                        parsed_data = self.parser.parse_stream_chunk(chunk)
-                        
-                        if parsed_data:
-                            # 处理结构化数据
-                            if isinstance(parsed_data, dict):
-                                thinking = parsed_data.get('thinking', '')
-                                content = parsed_data.get('content', '')
-                                
-                                if config.DEBUG:
-                                    if thinking:
-                                        print(f"✅ 解析到思维链: {thinking[:50]}...")
-                                    if content:
-                                        print(f"✅ 解析到正文: {content[:50]}...")
-                                
-                                # 直接yield整个结构化数据，让parser.to_openai_format处理增量
-                                # 这里简化处理，每次都返回完整数据
-                                yield parsed_data
-                                last_text = parsed_data
-                            else:
-                                # 兼容旧格式
-                                print(f"✅ 解析到文本: {str(parsed_data)[:50]}...")
-                                if parsed_data != last_text:
+                        # 处理新的响应块
+                        for i in range(chunks_processed, current_chunk_count):
+                            async with response_lock:
+                                chunk = response_chunks[i]
+                            
+                            parsed_data = self.parser.parse_stream_chunk(chunk)
+                            
+                            if parsed_data:
+                                # 处理结构化数据
+                                if isinstance(parsed_data, dict):
+                                    thinking = parsed_data.get('thinking', '')
+                                    content = parsed_data.get('content', '')
+                                    
+                                    if config.DEBUG:
+                                        if thinking:
+                                            print(f"✅ 解析到思维链: {thinking[:50]}...")
+                                        if content:
+                                            print(f"✅ 解析到正文: {content[:50]}...")
+                                    
+                                    # 直接yield整个结构化数据，让parser.to_openai_format处理增量
+                                    # 这里简化处理，每次都返回完整数据
                                     yield parsed_data
                                     last_text = parsed_data
+                                else:
+                                    # 兼容旧格式
+                                    print(f"✅ 解析到文本: {str(parsed_data)[:50]}...")
+                                    if parsed_data != last_text:
+                                        yield parsed_data
+                                        last_text = parsed_data
+                        
+                        chunks_processed = current_chunk_count
+                        
+                        # 检查是否完成
+                        async with response_lock:
+                            last_chunk = response_chunks[-1] if response_chunks else ""
+                        
+                        if '"di"' in last_chunk or 'af.httprm' in last_chunk:
+                            print("✅ 响应完成")
+                            break
                     
-                    chunks_processed = current_chunk_count
-                    
-                    # 检查是否完成
-                    async with response_lock:
-                        last_chunk = response_chunks[-1] if response_chunks else ""
-                    
-                    if '"di"' in last_chunk or 'af.httprm' in last_chunk:
-                        print("✅ 响应完成")
-                        break
+                    await asyncio.sleep(0.5)
+                    retry_count += 1
                 
-                await asyncio.sleep(0.5)
-                retry_count += 1
-            
-            if retry_count >= max_retries:
-                timeout_message = f"⚠️ 响应超时：等待了{max_wait_minutes}分钟仍未收到完整响应。收到了 {len(response_chunks)} 个响应块。"
-                print(timeout_message)
-                # 将超时信息作为文本返回给用户
-                yield f"\n\n{timeout_message}\n\n如果问题持续，请尝试：\n1. 简化问题描述\n2. 重新发送请求\n3. 检查网络连接"
+                if retry_count >= max_retries:
+                    timeout_message = f"⚠️ 响应超时：等待了{max_wait_minutes}分钟仍未收到完整响应。收到了 {len(response_chunks)} 个响应块。"
+                    print(timeout_message)
+                    # 将超时信息作为文本返回给用户
+                    yield f"\n\n{timeout_message}\n\n如果问题持续，请尝试：\n1. 简化问题描述\n2. 重新发送请求\n3. 检查网络连接"
                 
         except Exception as e:
             print(f"❌ 发送消息失败: {e}")

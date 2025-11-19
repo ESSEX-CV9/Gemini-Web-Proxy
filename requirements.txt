@@ -2,3 +2,4 @@ flask==3.0.0
 playwright==1.40.0
 asyncio
 aiohttp==3.9.1
+html2text==2024.2.26
