@@ -28,7 +28,7 @@ else:  # Linux
 GEMINI_URL = "https://gemini.google.com/app"
 
 # 浏览器配置
-HEADLESS = False  # 是否无头模式（True = 不显示浏览器窗口）
+HEADLESS = True  # 是否无头模式（True = 不显示浏览器窗口）
 TIMEOUT = 60000  # 浏览器操作超时时间（毫秒）
 
 # 响应等待配置
