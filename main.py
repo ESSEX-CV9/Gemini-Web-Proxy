@@ -175,15 +175,19 @@ def non_stream_response(messages: list, model: str = config.DEFAULT_MODEL):
             # 收集所有响应
             full_thinking = ""
             full_content = ""
+            full_canvas = ""
             
             async for data_chunk in client.send_message(messages, model=model):
                 if isinstance(data_chunk, dict):
                     thinking = data_chunk.get('thinking', '')
                     content = data_chunk.get('content', '')
+                    canvas = data_chunk.get('canvas', '')
                     if thinking:
                         full_thinking = thinking  # 思维链通常是完整的，不需要累加
                     if content:
                         full_content = content  # 正文也是完整的
+                    if canvas:
+                        full_canvas = canvas  # Canvas也是完整的
                 else:
                     # 兼容旧格式
                     full_content += str(data_chunk)
@@ -196,17 +200,32 @@ def non_stream_response(messages: list, model: str = config.DEFAULT_MODEL):
                 if config.THINKING_FORMAT == "reasoning_content":
                     # o1系列格式
                     message["reasoning_content"] = full_thinking
-                    message["content"] = full_content
+                    # 将Canvas追加到正文
+                    if full_canvas:
+                        message["content"] = f"{full_content}\n\n{full_canvas}" if full_content else full_canvas
+                    else:
+                        message["content"] = full_content
                 elif config.THINKING_FORMAT == "inline":
                     # 内联格式
                     combined = f"<think>\n{full_thinking}\n</think>"
                     if full_content:
                         combined += f"\n\n{full_content}"
+                    # 将Canvas追加到正文
+                    if full_canvas:
+                        combined += f"\n\n{full_canvas}"
                     message["content"] = combined
                 else:
-                    message["content"] = full_content
+                    # 将Canvas追加到正文
+                    if full_canvas:
+                        message["content"] = f"{full_content}\n\n{full_canvas}" if full_content else full_canvas
+                    else:
+                        message["content"] = full_content
             else:
-                message["content"] = full_content
+                # 将Canvas追加到正文
+                if full_canvas:
+                    message["content"] = f"{full_content}\n\n{full_canvas}" if full_content else full_canvas
+                else:
+                    message["content"] = full_content
             
             # 返回 OpenAI 格式
             response = {

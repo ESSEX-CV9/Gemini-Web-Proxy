@@ -282,6 +282,200 @@ class GeminiClient:
             print("   将使用当前默认模型继续")
     
     
+    async def _delete_current_conversation(self, page: Page) -> bool:
+        """
+        删除当前对话
+        
+        Args:
+            page: Playwright页面对象
+        
+        Returns:
+            bool: 删除是否成功
+        """
+        try:
+            print("🗑️  尝试删除当前对话...")
+            
+            # 步骤1: 检查侧边栏是否已打开，如果未打开则点击按钮打开
+            sidenav_selectors = [
+                'bard-sidenav',
+                'side-navigation-content',
+            ]
+            
+            is_sidenav_open = False
+            for selector in sidenav_selectors:
+                try:
+                    sidenav = await page.query_selector(selector)
+                    if sidenav:
+                        # 方法1: 检查style属性中的width
+                        style = await sidenav.get_attribute('style')
+                        if style and '--bard-sidenav-open-width' in style:
+                            is_sidenav_open = True
+                            print("   ℹ️  侧边栏已打开")
+                            break
+                        
+                        # 方法2: 检查子元素是否有expanded类
+                        expanded_elem = await sidenav.query_selector('.expanded')
+                        if expanded_elem:
+                            is_sidenav_open = True
+                            print("   ℹ️  侧边栏已打开")
+                            break
+                except:
+                    continue
+            
+            # 如果侧边栏未打开，则点击按钮打开
+            if not is_sidenav_open:
+                menu_button_selectors = [
+                    'button[data-test-id="side-nav-menu-button"]',
+                    'button[aria-label*="主菜单"]',
+                    'button.main-menu-button',
+                ]
+                
+                menu_opened = False
+                for selector in menu_button_selectors:
+                    try:
+                        button = await page.wait_for_selector(selector, timeout=3000, state='visible')
+                        if button:
+                            await button.click()
+                            print("   ✅ 已打开侧边栏")
+                            menu_opened = True
+                            await asyncio.sleep(0.5)  # 等待侧边栏展开
+                            break
+                    except Exception as e:
+                        if config.DEBUG:
+                            print(f"   尝试菜单按钮 {selector} 失败: {e}")
+                        continue
+                
+                if not menu_opened:
+                    print("   ⚠️  未找到主菜单按钮，跳过删除")
+                    return False
+            
+            # 步骤2: 找到当前选中的对话（包含"selected"类）
+            selected_conversation_selectors = [
+                'div.conversation-items-container.selected',
+                'div.conversation.selected',
+                '[data-test-id="conversation"].selected',
+            ]
+            
+            selected_conversation = None
+            for selector in selected_conversation_selectors:
+                try:
+                    selected_conversation = await page.wait_for_selector(selector, timeout=2000, state='visible')
+                    if selected_conversation:
+                        print("   ✅ 找到当前对话")
+                        break
+                except:
+                    continue
+            
+            if not selected_conversation:
+                print("   ⚠️  未找到当前选中的对话，跳过删除")
+                return False
+            
+            # 步骤2.5: 将鼠标悬停在当前对话上，触发操作按钮显示
+            try:
+                await selected_conversation.hover()
+                print("   ✅ 鼠标已悬停在对话上")
+                await asyncio.sleep(0.3)  # 等待按钮显示动画
+            except Exception as e:
+                if config.DEBUG:
+                    print(f"   悬停失败: {e}")
+            
+            # 步骤3: 在选中的对话容器中找到操作菜单按钮
+            actions_menu_selectors = [
+                'button[data-test-id="actions-menu-button"]',
+                'button[aria-label*="对话操作"]',
+                'button.conversation-actions-menu-button',
+            ]
+            
+            actions_button = None
+            for selector in actions_menu_selectors:
+                try:
+                    # 在选中的对话容器内查找
+                    actions_button = await selected_conversation.query_selector(selector)
+                    if not actions_button:
+                        # 如果在容器内没找到，尝试在容器的兄弟元素中查找
+                        parent = await selected_conversation.evaluate_handle('el => el.parentElement')
+                        actions_button = await parent.query_selector(selector)
+                    
+                    if actions_button:
+                        is_visible = await actions_button.is_visible()
+                        if is_visible:
+                            await actions_button.click()
+                            print("   ✅ 已打开操作菜单")
+                            await asyncio.sleep(0.3)  # 等待菜单展开
+                            break
+                except Exception as e:
+                    if config.DEBUG:
+                        print(f"   尝试操作按钮 {selector} 失败: {e}")
+                    continue
+            
+            if not actions_button:
+                print("   ⚠️  未找到操作菜单按钮，跳过删除")
+                return False
+            
+            # 步骤4: 点击删除按钮（打开确认弹窗）
+            delete_button_selectors = [
+                'button[data-test-id="delete-button"]',
+                'button:has-text("删除")',
+                'button[aria-label*="删除"]',
+            ]
+            
+            delete_clicked = False
+            for selector in delete_button_selectors:
+                try:
+                    delete_button = await page.wait_for_selector(selector, timeout=2000, state='visible')
+                    if delete_button:
+                        await delete_button.click()
+                        print("   ✅ 已点击删除按钮")
+                        delete_clicked = True
+                        await asyncio.sleep(0.5)  # 等待确认弹窗出现
+                        break
+                except Exception as e:
+                    if config.DEBUG:
+                        print(f"   尝试删除按钮 {selector} 失败: {e}")
+                    continue
+            
+            if not delete_clicked:
+                print("   ⚠️  未找到删除按钮，跳过删除")
+                return False
+            
+            # 步骤5: 在确认弹窗中点击确认删除按钮
+            confirm_button_selectors = [
+                'button[data-test-id="confirm-button"]',
+                'mat-dialog-actions button:has-text("删除")',
+                'mat-dialog-container button:has-text("删除")',
+                '.mat-mdc-dialog-actions button.mat-primary:has-text("删除")',
+            ]
+            
+            confirm_clicked = False
+            for selector in confirm_button_selectors:
+                try:
+                    confirm_button = await page.wait_for_selector(selector, timeout=2000, state='visible')
+                    if confirm_button:
+                        await confirm_button.click()
+                        print("   ✅ 已确认删除")
+                        confirm_clicked = True
+                        await asyncio.sleep(0.5)  # 等待删除完成
+                        break
+                except Exception as e:
+                    if config.DEBUG:
+                        print(f"   尝试确认按钮 {selector} 失败: {e}")
+                    continue
+            
+            if confirm_clicked:
+                print("✅ 对话删除成功")
+                return True
+            else:
+                print("   ⚠️  未找到确认按钮，删除可能未完成")
+                return False
+                
+        except Exception as e:
+            print(f"⚠️  删除对话时出错（不影响后续操作）: {e}")
+            if config.DEBUG:
+                import traceback
+                traceback.print_exc()
+            return False
+    
+    
     async def _monitor_dom_updates(self, page: Page, use_streaming: bool = True) -> AsyncGenerator[dict, None]:
         """
         实时监控DOM更新并流式返回
@@ -308,11 +502,17 @@ class GeminiClient:
         
         last_thinking = ""
         last_content = ""
+        last_canvas = ""
         stable_count = 0
         max_stable_count = int(config.DOM_STABLE_TIMEOUT / config.DOM_POLL_INTERVAL)
         
         # 检查并点击思维链按钮（如果存在）
         thinking_button_clicked = False
+        # 检查并点击Canvas打开按钮（如果存在）
+        canvas_button_clicked = False
+        # 思维链稳定计数器（确保思维链完全稳定后再提取Canvas）
+        thinking_stable_count = 0
+        thinking_stable_threshold = 3  # 思维链需要稳定3次轮询（0.6秒）才认为完成
         
         while True:
             try:
@@ -332,7 +532,24 @@ class GeminiClient:
                                 if config.DEBUG:
                                     print(f"⚠️ 点击思维链按钮失败: {e}")
                 
-                # 2. 提取思维链内容（保留格式）
+                # 2. 检查Canvas打开按钮
+                if not canvas_button_clicked:
+                    canvas_button = await page.query_selector('button[data-test-id="view-report-button"]')
+                    if canvas_button:
+                        is_visible = await canvas_button.is_visible()
+                        if is_visible:
+                            try:
+                                await canvas_button.click()
+                                print("✅ 已点击Canvas打开按钮")
+                                canvas_button_clicked = True
+                                # 等待Canvas面板完全展开，并确保思维链内容稳定
+                                # 增加等待时间，避免思维链尾部被误认为Canvas内容
+                                await asyncio.sleep(1.0)
+                            except Exception as e:
+                                if config.DEBUG:
+                                    print(f"⚠️ 点击Canvas按钮失败: {e}")
+                
+                # 3. 提取思维链内容（保留格式）
                 current_thinking = None
                 if thinking_button_clicked:
                     thinking_elements = await page.query_selector_all('model-thoughts[data-test-id="model-thoughts"] .thoughts-content .markdown')
@@ -349,23 +566,83 @@ class GeminiClient:
                         if thinking_texts:
                             current_thinking = "\n\n".join(thinking_texts)
                 
-                # 3. 提取正文内容（保留格式）
-                current_content = None
-                content_elements = await page.query_selector_all('message-content[class*="model-response-text"] .markdown')
-                if content_elements:
-                    content_texts = []
-                    for elem in content_elements:
-                        # 使用inner_html获取HTML内容，然后转换为Markdown
-                        html_content = await elem.inner_html()
-                        if html_content and html_content.strip():
-                            # 转换HTML为Markdown
-                            markdown_text = self.html_converter.handle(html_content).strip()
-                            if markdown_text:
-                                content_texts.append(markdown_text)
-                    if content_texts:
-                        current_content = "\n\n".join(content_texts)
+                # 3.5. 检测思维链是否稳定
+                if current_thinking == last_thinking and current_thinking:
+                    thinking_stable_count += 1
+                else:
+                    thinking_stable_count = 0
                 
-                # 4. 检测变化
+                # 4. 提取Canvas文档内容
+                # 重要：只有在思维链稳定后才提取Canvas，避免思维链尾部混入Canvas
+                current_canvas = None
+                thinking_is_stable = (thinking_stable_count >= thinking_stable_threshold) or not thinking_button_clicked
+                canvas_panel = await page.query_selector('extended-response-panel')
+                if canvas_panel and thinking_is_stable:
+                    # 提取文档标题
+                    title_elem = await canvas_panel.query_selector('h2.title-text')
+                    canvas_title = None
+                    if title_elem:
+                        canvas_title = await title_elem.inner_text()
+                    
+                    # 提取文档内容 - 使用JavaScript过滤不需要的元素
+                    content_elem = await canvas_panel.query_selector('.immersive-editor .ProseMirror')
+                    if content_elem:
+                        # 使用JavaScript获取纯文本内容，排除按钮和时间戳
+                        canvas_html = await content_elem.evaluate('''(element) => {
+                            // 克隆元素以避免修改原DOM
+                            const clone = element.cloneNode(true);
+                            
+                            // 移除所有按钮元素
+                            const buttons = clone.querySelectorAll('button');
+                            buttons.forEach(btn => btn.remove());
+                            
+                            // 移除时间戳元素
+                            const timestamps = clone.querySelectorAll('[data-test-id="creation-timestamp"]');
+                            timestamps.forEach(ts => ts.remove());
+                            
+                            // 移除其他不需要的UI元素
+                            const unwanted = clone.querySelectorAll('.retry-without-tool-button, .creation-timestamp');
+                            unwanted.forEach(el => el.remove());
+                            
+                            return clone.innerHTML;
+                        }''')
+                        
+                        if canvas_html and canvas_html.strip():
+                            # 转换HTML为Markdown
+                            markdown_text = self.html_converter.handle(canvas_html).strip()
+                            if markdown_text:
+                                # 用代码块包裹Canvas内容
+                                if canvas_title:
+                                    current_canvas = f"```canvas\n# {canvas_title}\n\n{markdown_text}\n```"
+                                else:
+                                    current_canvas = f"```canvas\n{markdown_text}\n```"
+                                
+                                if config.DEBUG:
+                                    print(f"📄 提取到Canvas文档: {canvas_title or '(无标题)'}")
+                
+                # 5. 提取正文内容（保留格式，排除Canvas面板）
+                current_content = None
+                # 使用更精确的选择器，只选择正文区域的markdown，排除Canvas面板
+                # 策略：选择message-content但不在extended-response-panel内的
+                content_container = await page.query_selector('message-content[class*="model-response-text"]')
+                if content_container:
+                    # 检查是否在Canvas面板内
+                    is_in_canvas = await content_container.evaluate('''(element) => {
+                        return element.closest('extended-response-panel') !== null;
+                    }''')
+                    
+                    if not is_in_canvas:
+                        # 只处理不在Canvas面板内的正文
+                        markdown_elem = await content_container.query_selector('.markdown')
+                        if markdown_elem:
+                            html_content = await markdown_elem.inner_html()
+                            if html_content and html_content.strip():
+                                # 转换HTML为Markdown
+                                markdown_text = self.html_converter.handle(html_content).strip()
+                                if markdown_text:
+                                    current_content = markdown_text
+                
+                # 6. 检测变化
                 has_change = False
                 
                 if current_thinking != last_thinking:
@@ -380,20 +657,27 @@ class GeminiClient:
                     if config.DEBUG and current_content:
                         print(f"📝 正文更新: {current_content[:50]}...")
                 
-                # 5. 返回数据
+                if current_canvas != last_canvas:
+                    has_change = True
+                    last_canvas = current_canvas
+                    if config.DEBUG and current_canvas:
+                        print(f"📄 Canvas更新: {current_canvas[:50]}...")
+                
+                # 7. 返回数据
                 if has_change:
                     stable_count = 0  # 重置稳定计数
                     
                     if use_streaming:
-                        # 流式模式：返回增量或完整数据
+                        # 流式模式：返回完整数据（包含独立的canvas字段）
                         yield {
                             "thinking": current_thinking,
-                            "content": current_content
+                            "content": current_content,
+                            "canvas": current_canvas
                         }
                 else:
                     stable_count += 1
                 
-                # 6. 检测完成
+                # 8. 检测完成
                 # 方法1: 文本稳定一段时间
                 if stable_count >= max_stable_count:
                     print(f"✅ 文本已稳定 {config.DOM_STABLE_TIMEOUT} 秒，判定完成")
@@ -401,7 +685,8 @@ class GeminiClient:
                     if not use_streaming:
                         yield {
                             "thinking": current_thinking,
-                            "content": current_content
+                            "content": current_content,
+                            "canvas": current_canvas
                         }
                     break
                 
@@ -412,7 +697,8 @@ class GeminiClient:
                     if not use_streaming:
                         yield {
                             "thinking": current_thinking,
-                            "content": current_content
+                            "content": current_content,
+                            "canvas": current_canvas
                         }
                     break
                 
@@ -692,6 +978,14 @@ class GeminiClient:
             print(f"❌ 发送消息失败: {e}")
             raise
         finally:
+            # 在关闭标签页前尝试删除当前对话
+            try:
+                await self._delete_current_conversation(new_page)
+            except Exception as e:
+                # 删除失败不影响后续操作
+                if config.DEBUG:
+                    print(f"⚠️  删除对话失败（不影响后续操作）: {e}")
+            
             # 关闭新标签页
             try:
                 await new_page.close()

@@ -1,6 +1,6 @@
 # 🚀 Gemini to OpenAI API Proxy
 
-将 Gemini Pro 网页版包装为 OpenAI API 格式，让你能在 VS Code Kilo Code 等 IDE 中使用 Gemini Pro！
+将 Gemini 网页版包装为 OpenAI API 格式，让你能在 VS Code Kilo Code 等 IDE 或者其他前端 中使用。
 
 ## ✨ 特性
 
@@ -14,7 +14,6 @@
 
 1. **Python 3.8+**
 2. **Google Chrome 浏览器** 已安装并登录 Gemini Pro
-3. **Gemini Pro 订阅** 有效
 
 ## 🔧 安装步骤
 
@@ -76,16 +75,16 @@ python main.py
 💡 提示：
    1. 请确保 Chrome 浏览器已登录 Gemini Pro
    2. 首次启动会打开浏览器，请保持运行
-   3. 在 VS Code Kilo Code 中配置:
+   3. 在模型API链接中配置:
       API Base URL: http://127.0.0.1:5000/v1
       Model: gemini-pro
 ```
 
 ## 🎮 使用方法
 
-### 在 VS Code Kilo Code 中配置
+### 在你需要LLM的程序中配置
 
-1. 打开 Kilo Code 设置
+1. 打开openAI或者openAI兼容的API设置
 2. 配置 API：
    - **API Base URL**: `http://127.0.0.1:5000/v1`
    - **API Key**: 任意填写（会被忽略）
@@ -134,6 +133,9 @@ TIMEOUT = 30000     # 超时时间（毫秒）
 
 # 调试模式
 DEBUG = True        # 是否打印调试信息
+
+# DOM流式配置 ---- 实验性功能 谨慎使用 ----
+USE_DOM_STREAMING = True # 流式模式是否使用DOM监听（True=真流式，False=假流式）
 ```
 
 ## 🐛 故障排除
@@ -156,7 +158,7 @@ DEBUG = True        # 是否打印调试信息
 
 **解决方案：**
 1. 运行 `playwright install chromium`
-2. 确保没有其他程序占用 Chrome 配置文件
+2. 确保没有其他程序占用 Chrome 配置文件，**最好直接关闭所有的当前正在使用的Chrome浏览器！**
 3. 尝试设置 `HEADLESS = False` 查看浏览器窗口
 
 ### 问题 4: "响应超时"
@@ -197,18 +199,10 @@ Gemini Pro 网页版
 - 不要分享你的 API 服务给他人
 - 定期检查 Google 账号的安全日志
 
-## 📝 许可证
-
-MIT License
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
 ## 💡 常见问题
 
 **Q: 为什么不直接用 Google AI Studio API？**
-A: Pro 会员不提供额外的 API 配额，免费 API 限制很严格。
+A: Pro 会员不提供额外的 API 配额，如果你不想用GAS的免费层级key或者GAS的key当日额度用完了，可以用这个临时凑合一下。
 
 **Q: 这个方案稳定吗？**
 A: 相对稳定，但 Google 可能随时更改网页结构导致失效。

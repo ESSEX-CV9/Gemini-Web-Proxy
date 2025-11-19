@@ -365,23 +365,55 @@ class GeminiResponseParser:
         # 用于跟踪上次发送的内容，实现增量输出
         self.last_thinking = ""
         self.last_content = ""
+        self.last_canvas = ""
         # 用于标记思维链是否已完成（避免思维链和正文混淆）
         self.thinking_completed = False
+        # 用于标记Canvas是否已开始（需要在结束时发送闭合标记）
+        self.canvas_started = False
+        # 用于标记Canvas是否已完成（避免思维链尾部混入Canvas）
+        self.canvas_completed = False
     
     def to_openai_format(self, data_chunk, is_done: bool = False, model: str = "gemini-pro") -> str:
         """
         转换为 OpenAI SSE 格式
         
         Args:
-            data_chunk: 文本块或结构化数据 {"thinking": str, "content": str}
+            data_chunk: 文本块或结构化数据 {"thinking": str, "content": str, "canvas": str}
             is_done: 是否完成
             model: 模型名称
         """
         if is_done:
+            # 如果Canvas已开始但未闭合，发送闭合标记
+            closing_marker = ""
+            if self.canvas_started and not self.canvas_completed:
+                closing_marker = "\n```"
+            
             # 重置状态
             self.last_thinking = ""
             self.last_content = ""
+            self.last_canvas = ""
             self.thinking_completed = False
+            self.canvas_started = False
+            self.canvas_completed = False
+            
+            # 如果需要发送闭合标记，先发送它
+            if closing_marker:
+                delta = {"content": closing_marker}
+                response = {
+                    "id": f"chatcmpl-{self.response_id or 'unknown'}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": delta,
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                return f"data: {json.dumps(response)}\n\ndata: [DONE]\n\n"
+            
             return "data: [DONE]\n\n"
         
         # 构建delta对象
@@ -391,10 +423,12 @@ class GeminiResponseParser:
         if isinstance(data_chunk, dict):
             thinking = data_chunk.get('thinking')
             content = data_chunk.get('content')
+            canvas = data_chunk.get('canvas')
             
             # 计算增量（只发送新增的部分）
             thinking_delta = None
             content_delta = None
+            canvas_delta = None
             
             # 处理思维链更新
             if thinking and thinking != self.last_thinking:
@@ -437,6 +471,43 @@ class GeminiResponseParser:
                     content_delta = content
                 self.last_content = content
             
+            # 处理Canvas更新
+            if canvas and canvas != self.last_canvas:
+                if config.USE_DOM_STREAMING:
+                    # DOM流式模式：计算增量
+                    # Canvas内容格式: ```canvas\n# 标题\n\n内容...\n```
+                    
+                    def extract_canvas_content(text):
+                        """从```canvas\n...\n```中提取实际内容"""
+                        if text and text.startswith('```canvas\n') and text.endswith('\n```'):
+                            return text[10:-4]  # 去掉```canvas\n和\n```
+                        return text
+                    
+                    current_canvas_content = extract_canvas_content(canvas)
+                    last_canvas_content = extract_canvas_content(self.last_canvas) if self.last_canvas else ""
+                    
+                    if not last_canvas_content:
+                        # 首次出现Canvas，发送开始标记和完整内容
+                        canvas_delta = f"```canvas\n{current_canvas_content}"
+                        self.canvas_started = True
+                        self.canvas_completed = False
+                    elif current_canvas_content.startswith(last_canvas_content):
+                        # 内容是扩展的，只发送增量部分（不带任何标记）
+                        incremental_content = current_canvas_content[len(last_canvas_content):]
+                        canvas_delta = incremental_content if incremental_content else None
+                    else:
+                        # 完全不同的内容（Canvas被替换），先关闭旧的，再开始新的
+                        canvas_delta = f"\n```\n\n```canvas\n{current_canvas_content}"
+                        self.canvas_started = True
+                        self.canvas_completed = False
+                else:
+                    # 网络监听模式：已经是增量
+                    canvas_delta = canvas
+                self.last_canvas = canvas
+            elif canvas and not self.canvas_completed:
+                # Canvas没有变化，标记为已完成
+                self.canvas_completed = True
+            
             # 根据配置选择格式
             if config.ENABLE_THINKING and config.THINKING_FORMAT == "reasoning_content":
                 # o1系列格式：使用单独的reasoning_content字段
@@ -444,22 +515,58 @@ class GeminiResponseParser:
                     delta["reasoning_content"] = thinking_delta
                 if content_delta:
                     delta["content"] = content_delta
+                # Canvas作为正文的一部分追加
+                if canvas_delta:
+                    if "content" in delta:
+                        # 在追加Canvas之前，检查content是否包含思维链尾部
+                        # 如果包含，先清理掉
+                        current_content = delta["content"]
+                        if self.thinking_completed and self.last_thinking and current_content.startswith(self.last_thinking):
+                            # 移除思维链尾部
+                            current_content = current_content[len(self.last_thinking):].lstrip()
+                        delta["content"] = f"{current_content}\n\n{canvas_delta}" if current_content else canvas_delta
+                    else:
+                        delta["content"] = canvas_delta
             elif config.ENABLE_THINKING and config.THINKING_FORMAT == "inline":
                 # 内联格式：在content中用<think>标签包裹
                 combined_content = ""
                 if thinking_delta:
                     combined_content = f"<think>\n{thinking_delta}\n</think>"
                 if content_delta:
+                    # 检查content_delta是否包含思维链尾部
+                    clean_content_delta = content_delta
+                    if self.thinking_completed and self.last_thinking and content_delta.startswith(self.last_thinking):
+                        clean_content_delta = content_delta[len(self.last_thinking):].lstrip()
+                    
                     if combined_content:
-                        combined_content += f"\n\n{content_delta}"
+                        combined_content += f"\n\n{clean_content_delta}" if clean_content_delta else ""
                     else:
-                        combined_content = content_delta
+                        combined_content = clean_content_delta
+                # Canvas作为正文的一部分追加
+                if canvas_delta:
+                    if combined_content:
+                        combined_content += f"\n\n{canvas_delta}"
+                    else:
+                        combined_content = canvas_delta
                 if combined_content:
                     delta["content"] = combined_content
             else:
                 # 不启用思维链，只返回content
+                combined_content = ""
                 if content_delta:
-                    delta["content"] = content_delta
+                    # 即使不启用思维链显示，也要检查并清理可能的思维链残留
+                    clean_content_delta = content_delta
+                    if self.thinking_completed and self.last_thinking and content_delta.startswith(self.last_thinking):
+                        clean_content_delta = content_delta[len(self.last_thinking):].lstrip()
+                    combined_content = clean_content_delta
+                # Canvas作为正文的一部分追加
+                if canvas_delta:
+                    if combined_content:
+                        combined_content += f"\n\n{canvas_delta}"
+                    else:
+                        combined_content = canvas_delta
+                if combined_content:
+                    delta["content"] = combined_content
         else:
             # 兼容旧格式：直接是字符串
             if data_chunk:
